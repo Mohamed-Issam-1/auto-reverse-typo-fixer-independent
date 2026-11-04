@@ -50,18 +50,17 @@ fn process_basename(path: &str) -> Option<String> {
     }
 }
 
-/// A zero style for an Edit control is ambiguous (GetWindowLongW can fail).
-/// Reject it, while other control classes must still pass the separate UIA gate.
+/// Interim fail-closed policy for virtual/embedded editors: until we can
+/// confirm the focused UIA element identity immediately before replacement,
+/// only a positively identified classic Win32 Edit control is eligible.
+/// WPF/WinUI/embedded fields may share a native HWND across different elements;
+/// an earlier cached UIA NonPassword result cannot authorize such a field.
+/// A zero style for an Edit control is also ambiguous; reject it.
 fn win32_password_status(class: &str, style: i32) -> Option<bool> {
-    if class.eq_ignore_ascii_case("Edit") {
-        if style == 0 {
-            None
-        } else {
-            Some(style & ES_PASSWORD != 0)
-        }
-    } else {
-        Some(false)
+    if !class.eq_ignore_ascii_case("Edit") || style == 0 {
+        return None;
     }
+    Some(style & ES_PASSWORD != 0)
 }
 
 impl FocusMonitor {
@@ -116,8 +115,9 @@ impl FocusMonitor {
         }
     }
 
-    /// Classic Win32 Edit controls: never cache a password decision by HWND.
-    /// Non-Edit controls still require current UI Automation classification.
+    /// Only classic Edit controls may proceed to the separate UIA safety gate.
+    /// Non-Edit (including WPF) controls fail closed until identity revalidation
+    /// can rule out changes between virtual child elements sharing one HWND.
     fn is_password(focus: HWND) -> Option<bool> {
         unsafe {
             let mut buf = [0u16; 128];
@@ -232,6 +232,18 @@ mod fresh_context_tests {
         );
         assert_eq!(win32_password_status("eDiT", 0x4000_0000), Some(false));
         assert_eq!(win32_password_status("Edit", 0), None);
-        assert_eq!(win32_password_status("Chrome_WidgetWin_1", 0), Some(false));
+        assert_eq!(win32_password_status("Chrome_WidgetWin_1", 0), None);
+    }
+
+    #[test]
+    fn virtual_or_embedded_controls_fail_closed_even_with_a_shared_native_handle() {
+        for class in [
+            "HwndWrapper[WPF;;abc]",
+            "Chrome_WidgetWin_1",
+            "Windows.UI.Composition.DesktopWindowContentBridge",
+            "RICHEDIT50W",
+        ] {
+            assert_eq!(win32_password_status(class, 0), None, "{class}");
+        }
     }
 }
