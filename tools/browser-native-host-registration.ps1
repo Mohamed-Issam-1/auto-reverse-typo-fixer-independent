@@ -47,6 +47,10 @@ if ($Mode -ne "Plan") {
     if (-not $ExtensionId) {
         throw "ExtensionId is required for Registry changes"
     }
+    # Temporary fail-closed barrier: CreateSubKey can open an
+    # existing key, and compare-then-delete is not atomic.
+    # Keep both write modes disabled until reviewed.
+    throw "WRITE_MODES_SUSPENDED_9C4D2D2"
 }
 
 function Get-KeyEntries {

@@ -39,7 +39,8 @@ jobs:
             'tools/browser-registry-isolated-backend.ps1',
             'tools/test-browser-registry-isolated.ps1',
             'tools/browser-registry-transaction-bridge.ps1',
-            'tools/test-browser-registry-transaction-bridge.ps1'
+            'tools/test-browser-registry-transaction-bridge.ps1',
+            'tools/test-browser-registration-race-barrier.ps1'
           )
           foreach ($file in $scripts) {
             $tokens = $null
@@ -59,6 +60,7 @@ jobs:
           & ./tools/test-browser-registration-transaction.ps1
           & ./tools/test-browser-registry-isolated.ps1 -Mode Plan
           & ./tools/test-browser-registry-transaction-bridge.ps1 -Mode Plan
+          & ./tools/test-browser-registration-race-barrier.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: arf-win-windows-x64
