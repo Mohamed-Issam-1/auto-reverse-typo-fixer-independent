@@ -215,6 +215,29 @@ if ($machineEntries.Count -gt 0) {
     throw "Machine-wide registration requires review"
 }
 
+. (Join-Path $PSScriptRoot "browser-registration-policy.ps1")
+
+$decision = Get-ArfRegistrationDecision `
+    -Mode $Mode `
+    -ManifestValid ([bool]$validManifest) `
+    -OriginAllowlisted ([bool]$allowlisted) `
+    -ManifestPath $manifestPath `
+    -ExtensionOrigin "chrome-extension://$ExtensionId/" `
+    -Owner $owner `
+    -UserEntries $userEntries `
+    -MachineEntries $machineEntries
+
+$requiredDecision = if ($Mode -eq "Register") {
+    "ALLOW_REGISTER"
+} else {
+    "ALLOW_UNREGISTER"
+}
+
+if ($decision -cne $requiredDecision) {
+    throw "Registration policy blocked operation: $decision"
+}
+
+Write-Host "POLICY_PRECHECK=$decision"
 $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
     [Microsoft.Win32.RegistryHive]::CurrentUser,
     [Microsoft.Win32.RegistryView]::Registry64
