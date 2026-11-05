@@ -32,7 +32,8 @@ jobs:
             'tools/browser-registration-policy.ps1'
             'tools/browser-registration-snapshot.ps1'
             'tools/test-browser-registration-policy.ps1'
-            'tools/test-browser-registration-snapshot.ps1'
+            'tools/test-browser-registration-snapshot.ps1',
+            'tools/test-browser-registration-wiring.ps1'
           )
           foreach ($file in $scripts) {
             $tokens = $null
@@ -48,6 +49,7 @@ jobs:
           }
           & ./tools/test-browser-registration-policy.ps1
           & ./tools/test-browser-registration-snapshot.ps1
+          & ./tools/test-browser-registration-wiring.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: arf-win-windows-x64

@@ -215,7 +215,7 @@ if ($machineEntries.Count -gt 0) {
     throw "Machine-wide registration requires review"
 }
 
-. (Join-Path $PSScriptRoot "browser-registration-policy.ps1")
+. (Join-Path $PSScriptRoot "browser-registration-snapshot.ps1")
 
 $decision = Get-ArfRegistrationDecision `
     -Mode $Mode `
@@ -238,6 +238,37 @@ if ($decision -cne $requiredDecision) {
 }
 
 Write-Host "POLICY_PRECHECK=$decision"
+
+# Refresh both Registry hives after the initial policy decision.
+# These reads do not write to Registry.
+$freshUserEntries = @(
+    Get-KeyEntries -Hive CurrentUser -Path $subkey
+)
+
+$freshMachineEntries = @(
+    Get-KeyEntries -Hive LocalMachine -Path $subkey
+)
+
+$origin = "chrome-extension://$ExtensionId/"
+
+$stableDecision = Get-ArfStableRegistrationDecision `
+    -Mode $Mode `
+    -Scope $Scope `
+    -ManifestValid ([bool]$validManifest) `
+    -OriginAllowlisted ([bool]$allowlisted) `
+    -ManifestPath $manifestPath `
+    -ExtensionOrigin $origin `
+    -Owner $owner `
+    -BeforeUserEntries $userEntries `
+    -AfterUserEntries $freshUserEntries `
+    -BeforeMachineEntries $machineEntries `
+    -AfterMachineEntries $freshMachineEntries
+
+if ($stableDecision -cne $requiredDecision) {
+    throw "Snapshot safety gate blocked operation: $stableDecision"
+}
+
+Write-Host "SNAPSHOT_GATE=$stableDecision"
 $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
     [Microsoft.Win32.RegistryHive]::CurrentUser,
     [Microsoft.Win32.RegistryView]::Registry64
@@ -338,7 +369,35 @@ try {
         }
 
         try {
-            $parent.DeleteSubKey($name, $false)
+            # Final read-only recheck immediately before deletion.
+# ChromiumShared removal is always denied by the stable policy.
+$beforeDeleteUser = @(
+    Get-KeyEntries -Hive CurrentUser -Path $subkey
+)
+
+$beforeDeleteMachine = @(
+    Get-KeyEntries -Hive LocalMachine -Path $subkey
+)
+
+$deleteDecision = Get-ArfStableRegistrationDecision `
+    -Mode Unregister `
+    -Scope $Scope `
+    -ManifestValid ([bool]$validManifest) `
+    -OriginAllowlisted ([bool]$allowlisted) `
+    -ManifestPath $manifestPath `
+    -ExtensionOrigin $origin `
+    -Owner $owner `
+    -BeforeUserEntries $freshUserEntries `
+    -AfterUserEntries $beforeDeleteUser `
+    -BeforeMachineEntries $freshMachineEntries `
+    -AfterMachineEntries $beforeDeleteMachine
+
+if ($deleteDecision -cne "ALLOW_UNREGISTER") {
+    throw "Final deletion guard blocked operation: $deleteDecision"
+}
+
+Write-Host "FINAL_DELETE_GATE=ALLOW_UNREGISTER"
+        $parent.DeleteSubKey($name, $false)
         }
         finally {
             $parent.Close()
