@@ -1,6 +1,6 @@
 "use strict";
 
-// Diagnostic only: no native messaging, storage or networking.
+// Diagnostic-only field classification and explicit native health check.
 const VALID = new Set([
   "NONE", "UNKNOWN", "BLOCK", "TEXT_CANDIDATE"
 ]);
@@ -56,5 +56,52 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       tabId,
       text: "?"
     }).catch(() => {});
+  }
+});
+
+// Health requests are accepted ONLY from our extension popup.
+// Website/content-script messages cannot trigger native messaging.
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (!message || message.kind !== "arf.native.health.request.v1") {
+    return false;
+  }
+
+  const trusted =
+    sender &&
+    sender.id === chrome.runtime.id &&
+    sender.url === chrome.runtime.getURL("popup.html") &&
+    !sender.tab &&
+    Object.keys(message).length === 1;
+
+  if (!trusted) {
+    sendResponse({ok: false, status: "rejected"});
+    return false;
+  }
+
+  try {
+    chrome.runtime.sendNativeMessage(
+      "com.autoreversetypofixer.health",
+      {kind: "arf.health.v1"},
+      (response) => {
+        const valid =
+          !chrome.runtime.lastError &&
+          response &&
+          typeof response === "object" &&
+          !Array.isArray(response) &&
+          Object.keys(response).length === 3 &&
+          response.kind === "arf.health.v1" &&
+          response.status === "diagnostic-only" &&
+          response.correction_enabled === false;
+
+        sendResponse({
+          ok: Boolean(valid),
+          status: valid ? "connected" : "unavailable"
+        });
+      }
+    );
+    return true;
+  } catch (_) {
+    sendResponse({ok: false, status: "unavailable"});
+    return false;
   }
 });

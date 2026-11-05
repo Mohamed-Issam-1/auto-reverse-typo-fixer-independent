@@ -28,11 +28,11 @@ It returns a fixed diagnostic-only response.
 - No keyboard hooks or SendInput.
 - No clipboard access.
 - No text values or keystroke capture.
-- No browser permissions or Native Messaging registration yet.
+- Chromium requests nativeMessaging for an explicit health check only; no host registration is installed yet.
 - No changes to the Windows Registry.
 - No automatic browser-extension installation.
 
-The host is not connected to the extension in this batch.
+The extension can request a diagnostic health check after host registration. Text correction remains disabled.
 
 ## Future Native Messaging registration
 

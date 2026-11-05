@@ -1,10 +1,12 @@
 {
   "manifest_version": 3,
+  "permissions": ["nativeMessaging"],
   "name": "ARF Browser Field Inspector (Read Only)",
   "version": "0.1.0",
   "description": "Read-only field safety diagnostics. No text capture or correction.",
   "action": {
-    "default_title": "ARF Browser Inspector (read-only)"
+    "default_title": "ARF Browser Inspector (read-only)",
+    "default_popup": "popup.html"
   },
   "background": {
     "service_worker": "background.js"
