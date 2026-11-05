@@ -547,6 +547,73 @@ mod tests {
     }
 
     #[test]
+    fn live_timeout_rejects_missing_reply() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        guard.live_tx = Some(tx);
+
+        let started = Instant::now();
+        assert!(!guard.revalidate_live(context(), 0));
+        assert!(started.elapsed() >= LIVE_VERIFY_TIMEOUT);
+    }
+
+    #[test]
+    fn live_full_queue_rejects_new_request() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (reply, _reply_rx) = std::sync::mpsc::sync_channel(1);
+
+        tx.try_send(LiveRequest {
+            expected: context(),
+            epoch: 0,
+            reply,
+        })
+        .unwrap();
+
+        guard.live_tx = Some(tx);
+
+        assert!(!guard.revalidate_live(context(), 0));
+        assert!(rx.try_recv().is_ok());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn timed_out_reply_cannot_authorize_following_request() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        guard.live_tx = Some(tx);
+
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+
+        let worker = std::thread::spawn(move || {
+            let old = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+            // The original receiver has timed out and been dropped.
+            assert!(old.reply.try_send(true).is_err());
+
+            let next = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            next.reply.send(false).unwrap();
+        });
+
+        assert!(!guard.revalidate_live(context(), 0));
+
+        release_tx.send(()).unwrap();
+
+        assert!(!guard.revalidate_live(context(), 0));
+
+        worker.join().unwrap();
+    }
+    #[test]
     fn live_preflight_without_worker_does_not_authorize() {
         let guard = UiaGuard::empty();
         record(&guard, FocusSafety::NonPassword, Duration::ZERO);
