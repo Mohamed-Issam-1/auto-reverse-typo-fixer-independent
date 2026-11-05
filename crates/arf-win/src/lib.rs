@@ -11,6 +11,7 @@ pub mod focus;
 pub mod hook;
 pub mod inject;
 pub mod layout_win;
+pub mod native_messaging;
 pub mod overlay;
 pub mod sys;
 pub mod uia;
