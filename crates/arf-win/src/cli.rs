@@ -15,7 +15,7 @@ use arf_core::{Engine, Key, KeyboardLayout, Lang};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-const USAGE: &str = "arf-win [--config <file>] [--dict-dir <dir>] [--selftest] [--uia-selftest] [--uia-watch] [--uia-event-watch] [--uia-guard-watch] [--uia-guard-bench] [--input-queue-stress] [--uia-guard-probe] [--uia-guard-fault-test]\n\
+const USAGE: &str = "arf-win [--config <file>] [--dict-dir <dir>] [--selftest] [--uia-selftest] [--uia-watch] [--uia-event-watch] [--uia-guard-watch] [--uia-guard-bench] [--input-queue-stress] [--uia-guard-probe] [--uia-live-probe] [--uia-guard-fault-test]\n\
   --selftest      print detected layouts and how the keys for \"hgsghl\" translate under each";
 
 fn load_fst(path: &Path) -> Option<Box<dyn Dictionary>> {
@@ -100,6 +100,17 @@ pub fn run() -> i32 {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
+            "--uia-live-probe" => {
+                #[cfg(windows)]
+                {
+                    return uia_guard::run_live_guard_probe();
+                }
+                #[cfg(not(windows))]
+                {
+                    eprintln!("Requires Windows");
+                    return 1;
+                }
+            }
             "--uia-guard-fault-test" => {
                 #[cfg(windows)]
                 {

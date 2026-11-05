@@ -418,6 +418,54 @@ pub fn run_guard_probe() -> i32 {
     }
 }
 
+/// Read-only check of the actual live UIA worker.
+/// Does not install hooks, inject input, or read user content.
+/// Positive results are diagnostics, NOT permission to rewrite text.
+#[cfg(windows)]
+pub fn run_live_guard_probe() -> i32 {
+    println!("LIVE UIA PROBE: read-only. Focus a dedicated dummy field within 3 seconds.");
+    println!("No keyboard hooks, SendInput, or user text access.");
+    let guard = UiaGuard::start();
+    std::thread::sleep(Duration::from_secs(3));
+
+    let mut checked = 0usize;
+    let mut approved = 0usize;
+
+    for index in 0..15 {
+        if let Some(win) = read_win_focus() {
+            let cached = guard.verdict(win);
+            let started = Instant::now();
+            let live = cached.allows_text() && guard.revalidate_live(win, cached.epoch);
+            let elapsed = started.elapsed();
+
+            checked += 1;
+            if live {
+                approved += 1;
+            }
+
+            println!(
+                "LIVE {}/15: pid={} cached={:?} live={} elapsed_ms={:.2}",
+                index + 1,
+                win.pid,
+                cached.safety,
+                live,
+                elapsed.as_secs_f64() * 1000.0
+            );
+        } else {
+            println!("LIVE {}/15: Win32 focus unavailable; denied", index + 1);
+        }
+        std::thread::sleep(Duration::from_millis(120));
+    }
+
+    println!("LIVE_SUMMARY: checked={checked} approved={approved}");
+    println!("OBSERVATION_ONLY: full application eligibility was not evaluated.");
+    println!("No text was read or injected.");
+    if checked > 0 {
+        0
+    } else {
+        1
+    }
+}
 /// Synthetic fail-closed check: no UIA/Win32 calls or keyboard hooks.
 #[cfg(windows)]
 pub fn run_guard_fault_test() -> i32 {
@@ -612,6 +660,34 @@ mod tests {
         assert!(!guard.revalidate_live(context(), 0));
 
         worker.join().unwrap();
+    }
+    #[test]
+    fn disconnected_live_worker_fails_closed() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        drop(rx);
+        guard.live_tx = Some(tx);
+
+        assert!(!guard.revalidate_live(context(), 0));
+    }
+
+    #[test]
+    fn stopped_monitor_rejects_live_request_before_queueing() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        guard.live_tx = Some(tx);
+
+        mark_monitor_stopped(&guard.monitor_healthy, &guard.epoch, &guard.latest);
+
+        assert!(!guard.revalidate_live(context(), 0));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
     }
     #[test]
     fn live_preflight_without_worker_does_not_authorize() {
