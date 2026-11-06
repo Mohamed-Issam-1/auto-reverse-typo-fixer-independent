@@ -292,6 +292,19 @@ impl App {
             && hook::event_stream_healthy()
     }
 
+    /// On-demand UIA revalidation is required at the injection boundary, not on
+    /// every physical key. Recheck physical activity and Win32 focus on both sides.
+    fn live_safe_for_activity(&mut self, ctx: &FocusCtx, epoch: u64, activity: u64) -> bool {
+        let win = WinFocus {
+            hwnd: ctx.hwnd,
+            focus: ctx.focus,
+            pid: ctx.pid,
+        };
+        self.safe_for_activity(ctx, epoch, activity)
+            && self.uia.revalidate_live(win, epoch)
+            && self.safe_for_activity(ctx, epoch, activity)
+    }
+
     fn on_space(&mut self, now: u64, ctx: &FocusCtx, epoch: u64, activity: u64) {
         // Multi-call paced rewriting may erase text before it can be restored.
         // Do not attempt automatic corrections in apps configured for Paced mode.
@@ -316,7 +329,7 @@ impl App {
         }
         let mode = self.mode_for(&ctx.process);
         if inject::send_replacement_checked(c.backspaces, &c.text, mode, || {
-            self.safe_for_activity(ctx, epoch, activity)
+            self.live_safe_for_activity(ctx, epoch, activity)
         })
         .is_err()
         {
@@ -360,7 +373,7 @@ impl App {
         };
         let mode = self.mode_for(&ctx.process);
         if inject::send_replacement_checked(plan.backspaces, &plan.text, mode, || {
-            self.safe_for_activity(ctx, epoch, activity)
+            self.live_safe_for_activity(ctx, epoch, activity)
         })
         .is_err()
         {

@@ -22,6 +22,54 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test -p arf-core
       - run: cargo build --release -p arf-win
+      - name: Registration safety tests
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scripts = @(
+            'tools/browser-integration-manager.ps1'
+            'tools/browser-native-host-registration.ps1'
+            'tools/browser-registration-policy.ps1'
+            'tools/browser-registration-snapshot.ps1'
+            'tools/test-browser-registration-policy.ps1'
+            'tools/test-browser-registration-snapshot.ps1',
+            'tools/test-browser-registration-wiring.ps1',
+            'tools/browser-registration-transaction.ps1',
+            'tools/test-browser-registration-transaction.ps1',
+            'tools/browser-registry-isolated-backend.ps1',
+            'tools/test-browser-registry-isolated.ps1',
+            'tools/browser-registry-transaction-bridge.ps1',
+            'tools/test-browser-registry-transaction-bridge.ps1',
+            'tools/test-browser-registration-race-barrier.ps1',
+            'tools/browser-registration-race-model.ps1',
+            'tools/test-browser-registration-race-model.ps1',
+            'tools/browser-registry-txr-capabilities.ps1',
+            'tools/test-browser-registry-txr-capabilities.ps1',
+            'tools/browser-registry-txr-runtime-probe.ps1',
+            'tools/test-browser-registry-txr-runtime-probe.ps1'
+          )
+          foreach ($file in $scripts) {
+            $tokens = $null
+            $errorsFound = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile(
+              (Resolve-Path -LiteralPath $file).Path,
+              [ref]$tokens,
+              [ref]$errorsFound
+            )
+            if (@($errorsFound).Count -gt 0) {
+              throw "PowerShell syntax failed: $file"
+            }
+          }
+          & ./tools/test-browser-registration-policy.ps1
+          & ./tools/test-browser-registration-snapshot.ps1
+          & ./tools/test-browser-registration-wiring.ps1
+          & ./tools/test-browser-registration-transaction.ps1
+          & ./tools/test-browser-registry-isolated.ps1 -Mode Plan
+          & ./tools/test-browser-registry-transaction-bridge.ps1 -Mode Plan
+          & ./tools/test-browser-registration-race-barrier.ps1
+          & ./tools/test-browser-registration-race-model.ps1
+          & ./tools/test-browser-registry-txr-capabilities.ps1
+          & ./tools/test-browser-registry-txr-runtime-probe.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: arf-win-windows-x64

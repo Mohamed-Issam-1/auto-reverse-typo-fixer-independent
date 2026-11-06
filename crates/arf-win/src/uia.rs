@@ -19,6 +19,20 @@ pub fn classify(is_password: Option<bool>, has_focus: Option<bool>) -> FocusSafe
     }
 }
 
+/// Two UIA focus reads must refer to the same logical element before a
+/// NonPassword sample can be published. This is NOT a live pre-injection check.
+#[cfg(any(windows, test))]
+fn classify_with_identity(
+    is_password: Option<bool>,
+    has_focus: Option<bool>,
+    same_element: Option<bool>,
+) -> FocusSafety {
+    if same_element != Some(true) {
+        return FocusSafety::Unknown;
+    }
+    classify(is_password, has_focus)
+}
+
 #[cfg(windows)]
 pub(crate) fn query_focused() -> Result<(i32, FocusSafety), String> {
     use windows::Win32::System::Com::{
@@ -58,7 +72,15 @@ pub(crate) fn query_focused() -> Result<(i32, FocusSafety), String> {
         .ok()
         .map(|v| v.as_bool());
 
-    Ok((pid, classify(password, focused)))
+    // Never interpret a property snapshot as safe if the logical focus moved
+    // while it was read. CompareElements compares UIA element identity without
+    // reading Value, Name, TextPattern, or any user text.
+    let refocused = unsafe { automation.GetFocusedElement() }.ok();
+    let same_element = refocused
+        .and_then(|current| unsafe { automation.CompareElements(&element, &current) }.ok())
+        .map(|result| result.as_bool());
+
+    Ok((pid, classify_with_identity(password, focused, same_element)))
 }
 
 /// One-time, read-only probe. No key interception or text injection is enabled.
@@ -109,6 +131,36 @@ mod tests {
         assert_eq!(classify(Some(true), None), FocusSafety::Unknown);
         assert_eq!(classify(None, Some(true)), FocusSafety::Unknown);
         assert_eq!(classify(None, None), FocusSafety::Unknown);
+    }
+
+    #[test]
+    fn changed_or_unavailable_element_identity_fails_closed() {
+        for same_element in [Some(false), None] {
+            assert_eq!(
+                classify_with_identity(Some(false), Some(true), same_element),
+                FocusSafety::Unknown
+            );
+            assert_eq!(
+                classify_with_identity(Some(true), Some(true), same_element),
+                FocusSafety::Unknown
+            );
+        }
+    }
+
+    #[test]
+    fn matching_element_identity_keeps_password_classification() {
+        assert_eq!(
+            classify_with_identity(Some(true), Some(true), Some(true)),
+            FocusSafety::Password
+        );
+        assert_eq!(
+            classify_with_identity(Some(false), Some(true), Some(true)),
+            FocusSafety::NonPassword
+        );
+        assert_eq!(
+            classify_with_identity(Some(false), Some(false), Some(true)),
+            FocusSafety::Unknown
+        );
     }
 }
 

@@ -9,12 +9,20 @@ use std::time::{Duration, Instant};
 
 const MAX_SAMPLE_AGE: Duration = Duration::from_millis(600);
 const REFRESH_INTERVAL: Duration = Duration::from_millis(200);
+// A slow or stuck UIA provider must never create unbounded blocking in correction.
+const LIVE_VERIFY_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WinFocus {
     pub hwnd: isize,
     pub focus: isize,
     pub pid: u32,
+}
+
+struct LiveRequest {
+    expected: WinFocus,
+    epoch: u64,
+    reply: std::sync::mpsc::SyncSender<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -43,6 +51,8 @@ pub struct UiaGuard {
     stop: Arc<AtomicBool>,
     // Terminal monitoring failure must revoke cached permissions immediately.
     monitor_healthy: Arc<AtomicBool>,
+    // Bounded, one-at-a-time live verification on a separate MTA worker.
+    live_tx: Option<std::sync::mpsc::SyncSender<LiveRequest>>,
 }
 
 impl UiaGuard {
@@ -52,12 +62,15 @@ impl UiaGuard {
             latest: Arc::new(Mutex::new(None)),
             stop: Arc::new(AtomicBool::new(false)),
             monitor_healthy: Arc::new(AtomicBool::new(true)),
+            live_tx: None,
         }
     }
 
     /// Starts a dedicated MTA worker. Startup errors leave the gate Unknown.
     pub fn start() -> Self {
-        let guard = Self::empty();
+        // The live worker is configured only on Windows.
+        #[allow(unused_mut)]
+        let mut guard = Self::empty();
         #[cfg(windows)]
         {
             let epoch = Arc::clone(&guard.epoch);
@@ -88,6 +101,20 @@ impl UiaGuard {
                 eprintln!(
                     "warning: cannot spawn UIA safety monitor: {error}; correction remains blocked"
                 );
+            }
+
+            let (live_tx, live_rx) = std::sync::mpsc::sync_channel(1);
+            let live_epoch = Arc::clone(&guard.epoch);
+            let live_stop = Arc::clone(&guard.stop);
+            let live_healthy = Arc::clone(&guard.monitor_healthy);
+            match std::thread::Builder::new()
+                .name("arf-uia-pre-send".to_owned())
+                .spawn(move || live_verify_worker(live_rx, live_epoch, live_stop, live_healthy))
+            {
+                Ok(_) => guard.live_tx = Some(live_tx),
+                Err(error) => eprintln!(
+                    "warning: cannot spawn live UIA verification worker: {error}; injection is blocked"
+                ),
             }
         }
         guard
@@ -122,6 +149,35 @@ impl UiaGuard {
             epoch: after,
             safety,
         }
+    }
+
+    /// Request a fresh UIA classification immediately before/after SendInput.
+    /// Fails closed on stale data, busy/stalled workers, provider errors, or focus changes.
+    /// The OS can still change focus between this check and SendInput: not atomic.
+    pub fn revalidate_live(&self, expected: WinFocus, expected_epoch: u64) -> bool {
+        let cached = self.verdict(expected);
+        if cached.epoch != expected_epoch || !cached.allows_text() {
+            return false;
+        }
+        let Some(worker) = &self.live_tx else {
+            return false;
+        };
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        if worker
+            .try_send(LiveRequest {
+                expected,
+                epoch: expected_epoch,
+                reply,
+            })
+            .is_err()
+        {
+            return false;
+        }
+        if !matches!(response.recv_timeout(LIVE_VERIFY_TIMEOUT), Ok(true)) {
+            return false;
+        }
+        let after = self.verdict(expected);
+        after.epoch == expected_epoch && after.allows_text()
     }
 }
 
@@ -166,6 +222,49 @@ fn read_win_focus() -> Option<WinFocus> {
             focus: info.hwndFocus,
             pid,
         })
+    }
+}
+
+/// Dedicated bounded live-check worker. No keyboard hooks and no text access.
+/// GetFocusedElement is queried on this worker, never inside the keyboard hook.
+#[cfg(windows)]
+fn live_verify_worker(
+    rx: std::sync::mpsc::Receiver<LiveRequest>,
+    epoch: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+    healthy: Arc<AtomicBool>,
+) {
+    use crate::uia::{query_focused, sample_from_query};
+    use std::sync::mpsc::RecvTimeoutError;
+
+    while !stop.load(Ordering::Acquire) {
+        match rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(request) => {
+                let health_before = healthy.load(Ordering::Acquire);
+                let before = epoch.load(Ordering::Acquire);
+                let before_win = read_win_focus();
+                // query_focused already cross-checks logical identity using CompareElements.
+                // This query is fresh; cached NonPassword alone cannot pass this check.
+                let fresh = sample_from_query(query_focused());
+                let after_win = read_win_focus();
+                let after = epoch.load(Ordering::Acquire);
+                let verified = health_before
+                    && healthy.load(Ordering::Acquire)
+                    && request.expected.pid != 0
+                    && request.expected.hwnd != 0
+                    && request.expected.focus != 0
+                    && before == request.epoch
+                    && after == request.epoch
+                    && before_win == Some(request.expected)
+                    && after_win == Some(request.expected)
+                    && fresh.pid > 0
+                    && fresh.pid as u32 == request.expected.pid
+                    && fresh.safety == FocusSafety::NonPassword;
+                let _ = request.reply.try_send(verified);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
     }
 }
 
@@ -319,6 +418,54 @@ pub fn run_guard_probe() -> i32 {
     }
 }
 
+/// Read-only check of the actual live UIA worker.
+/// Does not install hooks, inject input, or read user content.
+/// Positive results are diagnostics, NOT permission to rewrite text.
+#[cfg(windows)]
+pub fn run_live_guard_probe() -> i32 {
+    println!("LIVE UIA PROBE: read-only. Focus a dedicated dummy field within 3 seconds.");
+    println!("No keyboard hooks, SendInput, or user text access.");
+    let guard = UiaGuard::start();
+    std::thread::sleep(Duration::from_secs(3));
+
+    let mut checked = 0usize;
+    let mut approved = 0usize;
+
+    for index in 0..15 {
+        if let Some(win) = read_win_focus() {
+            let cached = guard.verdict(win);
+            let started = Instant::now();
+            let live = cached.allows_text() && guard.revalidate_live(win, cached.epoch);
+            let elapsed = started.elapsed();
+
+            checked += 1;
+            if live {
+                approved += 1;
+            }
+
+            println!(
+                "LIVE {}/15: pid={} cached={:?} live={} elapsed_ms={:.2}",
+                index + 1,
+                win.pid,
+                cached.safety,
+                live,
+                elapsed.as_secs_f64() * 1000.0
+            );
+        } else {
+            println!("LIVE {}/15: Win32 focus unavailable; denied", index + 1);
+        }
+        std::thread::sleep(Duration::from_millis(120));
+    }
+
+    println!("LIVE_SUMMARY: checked={checked} approved={approved}");
+    println!("OBSERVATION_ONLY: full application eligibility was not evaluated.");
+    println!("No text was read or injected.");
+    if checked > 0 {
+        0
+    } else {
+        1
+    }
+}
 /// Synthetic fail-closed check: no UIA/Win32 calls or keyboard hooks.
 #[cfg(windows)]
 pub fn run_guard_fault_test() -> i32 {
@@ -445,6 +592,140 @@ mod tests {
             epoch: guard.epoch.load(Ordering::Acquire),
             checked_at: Instant::now() - age,
         });
+    }
+
+    #[test]
+    fn live_timeout_rejects_missing_reply() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+        let (tx, _rx) = std::sync::mpsc::sync_channel(1);
+        guard.live_tx = Some(tx);
+
+        let started = Instant::now();
+        assert!(!guard.revalidate_live(context(), 0));
+        assert!(started.elapsed() >= LIVE_VERIFY_TIMEOUT);
+    }
+
+    #[test]
+    fn live_full_queue_rejects_new_request() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let (reply, _reply_rx) = std::sync::mpsc::sync_channel(1);
+
+        tx.try_send(LiveRequest {
+            expected: context(),
+            epoch: 0,
+            reply,
+        })
+        .unwrap();
+
+        guard.live_tx = Some(tx);
+
+        assert!(!guard.revalidate_live(context(), 0));
+        assert!(rx.try_recv().is_ok());
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn timed_out_reply_cannot_authorize_following_request() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        guard.live_tx = Some(tx);
+
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+
+        let worker = std::thread::spawn(move || {
+            let old = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+            release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+            // The original receiver has timed out and been dropped.
+            assert!(old.reply.try_send(true).is_err());
+
+            let next = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            next.reply.send(false).unwrap();
+        });
+
+        assert!(!guard.revalidate_live(context(), 0));
+
+        release_tx.send(()).unwrap();
+
+        assert!(!guard.revalidate_live(context(), 0));
+
+        worker.join().unwrap();
+    }
+    #[test]
+    fn disconnected_live_worker_fails_closed() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        drop(rx);
+        guard.live_tx = Some(tx);
+
+        assert!(!guard.revalidate_live(context(), 0));
+    }
+
+    #[test]
+    fn stopped_monitor_rejects_live_request_before_queueing() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        guard.live_tx = Some(tx);
+
+        mark_monitor_stopped(&guard.monitor_healthy, &guard.epoch, &guard.latest);
+
+        assert!(!guard.revalidate_live(context(), 0));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+    }
+    #[test]
+    fn live_preflight_without_worker_does_not_authorize() {
+        let guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+        assert!(!guard.revalidate_live(context(), 0));
+    }
+
+    #[test]
+    fn live_preflight_requires_fresh_positive_reply() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        guard.live_tx = Some(tx);
+        let worker = std::thread::spawn(move || {
+            let request: LiveRequest = rx.recv().unwrap();
+            assert_eq!(request.expected, context());
+            assert_eq!(request.epoch, 0);
+            request.reply.send(true).unwrap();
+        });
+        assert!(guard.revalidate_live(context(), 0));
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn epoch_change_invalidates_even_positive_live_reply() {
+        let mut guard = UiaGuard::empty();
+        record(&guard, FocusSafety::NonPassword, Duration::ZERO);
+        let shared_epoch = Arc::clone(&guard.epoch);
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        guard.live_tx = Some(tx);
+        let worker = std::thread::spawn(move || {
+            let request: LiveRequest = rx.recv().unwrap();
+            shared_epoch.fetch_add(1, Ordering::AcqRel);
+            request.reply.send(true).unwrap();
+        });
+        assert!(!guard.revalidate_live(context(), 0));
+        worker.join().unwrap();
     }
 
     #[test]
